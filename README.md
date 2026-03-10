@@ -67,11 +67,25 @@ post-setup "bun install"
 
 ```bash
 ccws new <name> <branch>   # ワーカー環境を作成
+ccws fork <name> <branch>  # 未コミット変更ごとワーカーにフォーク
 ccws ls                     # 一覧表示（名前・ブランチ・パス）
+ccws status                 # 全ワーカーの状態表示（変更数・ahead/behind・最新コミット）
 ccws path <name>            # ワーカーのパスを出力
 ccws rm <name>              # 削除
 ccws rm --all --force       # 全ワーカーを削除
+ccws cleanup                # マージ済みワーカーを表示（dry-run）
+ccws cleanup --force        # マージ済みワーカーを削除
 ```
+
+### ccws fork — 作業途中をフォーク
+
+`ccws fork experiment feature/alt-approach` を実行すると:
+
+1. 現在の**未コミット変更**（staged + unstaged + untracked files）を diff としてキャプチャ
+2. `ccws new` と同じ手順でワーカー環境を作成
+3. キャプチャした diff をワーカーに適用
+
+元のワーキングツリーは**一切変更されない**。作業を中断せずに dirty state をフォークできる。
 
 `ccws path` は stdout にパスだけを出力するので、他のコマンドと組み合わせられる:
 

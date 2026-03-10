@@ -1,6 +1,6 @@
 [package]
 name = "ccws"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "Claude Code Workspace - Git clone-based workspace manager"
 rust-version = "1.93"

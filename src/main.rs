@@ -20,6 +20,13 @@ enum Commands {
         /// Branch name to create
         branch: String,
     },
+    /// Fork current dirty state into a new worker environment
+    Fork {
+        /// Worker name
+        name: String,
+        /// Branch name to create
+        branch: String,
+    },
     /// List all worker environments
     Ls,
     /// Print the path to a worker environment
@@ -38,6 +45,14 @@ enum Commands {
         #[arg(long, short)]
         force: bool,
     },
+    /// Show status of all worker environments
+    Status,
+    /// Remove workers whose branch is merged into main
+    Cleanup {
+        /// Actually delete (without this flag, only shows what would be deleted)
+        #[arg(long, short)]
+        force: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -45,9 +60,12 @@ fn main() -> ExitCode {
 
     let result = match cli.command {
         Commands::New { name, branch } => commands::new_worker(&name, &branch),
+        Commands::Fork { name, branch } => commands::fork_worker(&name, &branch),
         Commands::Ls => commands::list_workers(),
         Commands::Path { name } => commands::worker_path(&name),
         Commands::Rm { name, all, force } => commands::remove_worker(name.as_deref(), all, force),
+        Commands::Status => commands::status_workers(),
+        Commands::Cleanup { force } => commands::cleanup_workers(force),
     };
 
     match result {

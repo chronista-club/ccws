@@ -44,11 +44,12 @@ struct RawConfig {
     #[kdl(children, name = "symlink-pattern")]
     symlink_patterns: Vec<SymlinkPatternEntry>,
 
-    #[kdl(child)]
+    #[kdl(child(name = "post-setup"))]
     post_setup: Option<PostSetup>,
 }
 
 /// Parsed worker config
+#[derive(Debug)]
 pub struct WorkerConfig {
     pub symlinks: Vec<String>,
     pub copies: Vec<String>,
@@ -145,4 +146,116 @@ pub fn get_remote_url() -> io::Result<String> {
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- validate_worker_name ---
+
+    #[test]
+    fn valid_worker_names() {
+        assert!(validate_worker_name("issue-42").is_ok());
+        assert!(validate_worker_name("feature_login").is_ok());
+        assert!(validate_worker_name("my-repo-fix-123").is_ok());
+    }
+
+    #[test]
+    fn empty_name_rejected() {
+        assert!(validate_worker_name("").is_err());
+    }
+
+    #[test]
+    fn slash_rejected() {
+        assert!(validate_worker_name("../etc/passwd").is_err());
+        assert!(validate_worker_name("foo/bar").is_err());
+        assert!(validate_worker_name("foo\\bar").is_err());
+    }
+
+    #[test]
+    fn dotdot_rejected() {
+        assert!(validate_worker_name("..sneaky").is_err());
+        assert!(validate_worker_name("foo..bar").is_err());
+    }
+
+    #[test]
+    fn leading_dot_rejected() {
+        assert!(validate_worker_name(".hidden").is_err());
+        assert!(validate_worker_name(".git").is_err());
+    }
+
+    // --- load_config (KDL parsing) ---
+
+    /// Create a unique temp dir per test to avoid parallel test collisions
+    fn test_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "ccws-test-{name}-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir); // clean up leftover state
+        dir
+    }
+
+    #[test]
+    fn load_config_missing_file() {
+        let tmp = test_dir("no-config");
+        let _ = fs::create_dir_all(&tmp);
+        let result = load_config(&tmp);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not found"));
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn load_config_symlinks_and_copies() {
+        let tmp = test_dir("symlinks-copies");
+        let _ = fs::create_dir_all(tmp.join(".claude"));
+        fs::write(
+            tmp.join(".claude/worker-files.kdl"),
+            r#"symlink ".env"
+symlink ".mcp.json"
+copy "config/dev.toml"
+symlink-pattern "**/*.local.*"
+"#,
+        )
+        .unwrap();
+
+        let cfg = load_config(&tmp).unwrap();
+        assert_eq!(cfg.symlinks, vec![".env", ".mcp.json"]);
+        assert_eq!(cfg.copies, vec!["config/dev.toml"]);
+        assert_eq!(cfg.symlink_patterns, vec!["**/*.local.*"]);
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn load_config_post_setup() {
+        let tmp = test_dir("post-setup");
+        let _ = fs::create_dir_all(tmp.join(".claude"));
+        fs::write(
+            tmp.join(".claude/worker-files.kdl"),
+            "post-setup \"bun install\"\n",
+        )
+        .unwrap();
+
+        let cfg = load_config(&tmp).unwrap();
+        assert_eq!(cfg.post_setup.as_deref(), Some("bun install"));
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn load_config_empty_kdl() {
+        let tmp = test_dir("empty-kdl");
+        let _ = fs::create_dir_all(tmp.join(".claude"));
+        fs::write(tmp.join(".claude/worker-files.kdl"), "").unwrap();
+
+        let cfg = load_config(&tmp).unwrap();
+        assert!(cfg.symlinks.is_empty());
+        assert!(cfg.copies.is_empty());
+        assert!(cfg.post_setup.is_none());
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
 }

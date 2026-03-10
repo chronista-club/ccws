@@ -1,9 +1,39 @@
 use crate::config;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::fs;
 
 /// Create a new worker environment
 pub fn new_worker(name: &str, branch: &str) -> Result<(), String> {
+    let worker_dir = setup_worker(name, branch)?;
+    println!("{}", worker_dir.display());
+    Ok(())
+}
+
+/// Fork current dirty state into a new worker environment
+pub fn fork_worker(name: &str, branch: &str) -> Result<(), String> {
+    let repo_root = config::find_repo_root().map_err(|e| e.to_string())?;
+
+    // Capture dirty state as a diff BEFORE creating the worker
+    let diff = capture_dirty_diff(&repo_root)?;
+
+    let worker_dir = setup_worker(name, branch)?;
+
+    // Apply the captured diff to the worker
+    if let Some(patch) = diff {
+        eprintln!("Applying dirty state...");
+        apply_patch(&worker_dir, &patch)?;
+    } else {
+        eprintln!("No uncommitted changes to fork.");
+    }
+
+    println!("{}", worker_dir.display());
+    Ok(())
+}
+
+/// Common worker setup: clone, symlink, branch, post-setup.
+/// Returns the worker directory path.
+fn setup_worker(name: &str, branch: &str) -> Result<PathBuf, String> {
     config::validate_worker_name(name)?;
 
     let repo_root = config::find_repo_root().map_err(|e| e.to_string())?;
@@ -13,11 +43,7 @@ pub fn new_worker(name: &str, branch: &str) -> Result<(), String> {
 
     // Auto-prefix with repo name if not already included
     let repo_name = config::repo_name().unwrap_or_default();
-    let actual_name = if !repo_name.is_empty() && !name.starts_with(&format!("{repo_name}-")) {
-        format!("{repo_name}-{name}")
-    } else {
-        name.to_string()
-    };
+    let actual_name = apply_repo_prefix(name, &repo_name);
     let worker_dir = workers_dir.join(&actual_name);
 
     // Clean up existing
@@ -106,9 +132,7 @@ pub fn new_worker(name: &str, branch: &str) -> Result<(), String> {
         }
     }
 
-    // Output the path (stdout = composable)
-    println!("{}", worker_dir.display());
-    Ok(())
+    Ok(worker_dir)
 }
 
 /// List all worker environments
@@ -192,7 +216,202 @@ pub fn remove_worker(name: Option<&str>, all: bool, force: bool) -> Result<(), S
     Err(format!("worker '{name}' not found. Run `ccws ls` to see available workers."))
 }
 
+/// Show status of all worker environments
+pub fn status_workers() -> Result<(), String> {
+    let workers_dir = config::workers_dir()?;
+    if !workers_dir.exists() {
+        eprintln!("ワーカーはありません。`ccws new <name> <branch>` で作成できます。");
+        return Ok(());
+    }
+
+    let entries = fs::read_dir(&workers_dir).map_err(|e| e.to_string())?;
+    let mut found = false;
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() || !path.join(".git").exists() {
+            continue;
+        }
+        found = true;
+
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let branch = get_branch(&path).unwrap_or_else(|| "-".to_string());
+        let changes = count_changes(&path);
+        let ahead_behind = get_ahead_behind(&path);
+        let last_commit = get_last_commit(&path);
+
+        let changes_str = if changes > 0 {
+            format!("{changes} files")
+        } else {
+            "clean".to_string()
+        };
+
+        println!("{name}\t{branch}\t{changes_str}\t{ahead_behind}\t{last_commit}");
+    }
+
+    if !found {
+        eprintln!("ワーカーはありません。`ccws new <name> <branch>` で作成できます。");
+    }
+
+    Ok(())
+}
+
+/// Remove workers whose branch is merged into main
+pub fn cleanup_workers(force: bool) -> Result<(), String> {
+    let workers_dir = config::workers_dir()?;
+    if !workers_dir.exists() {
+        eprintln!("クリーンアップ対象はありません。");
+        return Ok(());
+    }
+
+    let entries = fs::read_dir(&workers_dir).map_err(|e| e.to_string())?;
+    let mut to_remove: Vec<(String, std::path::PathBuf)> = Vec::new();
+    let mut kept: Vec<(String, String)> = Vec::new();
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() || !path.join(".git").exists() {
+            continue;
+        }
+
+        let name = entry.file_name().to_string_lossy().to_string();
+
+        // Fetch latest remote state in each worker
+        let _ = run_git_in(&path, &["fetch", "--quiet"]);
+
+        if is_branch_merged(&path) {
+            to_remove.push((name, path));
+        } else {
+            let changes = count_changes(&path);
+            let reason = if changes > 0 {
+                format!("アクティブ ({changes} files changed)")
+            } else {
+                "未マージ".to_string()
+            };
+            kept.push((name, reason));
+        }
+    }
+
+    if to_remove.is_empty() {
+        eprintln!("クリーンアップ対象はありません。");
+        for (name, reason) in &kept {
+            eprintln!("  保持: {name} ({reason})");
+        }
+        return Ok(());
+    }
+
+    for (name, _) in &to_remove {
+        eprintln!("  削除可能: {name} (マージ済み)");
+    }
+    for (name, reason) in &kept {
+        eprintln!("  保持: {name} ({reason})");
+    }
+
+    if !force {
+        eprintln!("\n実際に削除するには `ccws cleanup --force` を実行してください。");
+        return Ok(());
+    }
+
+    for (name, path) in &to_remove {
+        fs::remove_dir_all(path).map_err(|e| e.to_string())?;
+        eprintln!("  削除: {name}");
+    }
+
+    eprintln!("{} ワーカーを削除しました。", to_remove.len());
+    Ok(())
+}
+
 // --- helpers ---
+
+/// Apply repo name prefix to worker name, avoiding double-prefixing.
+/// e.g. ("issue-42", "nexus") → "nexus-issue-42"
+///      ("nexus-issue-42", "nexus") → "nexus-issue-42"
+pub(crate) fn apply_repo_prefix(name: &str, repo_name: &str) -> String {
+    if !repo_name.is_empty() && !name.starts_with(&format!("{repo_name}-")) {
+        format!("{repo_name}-{name}")
+    } else {
+        name.to_string()
+    }
+}
+
+/// Capture uncommitted changes (staged + unstaged + untracked) as a combined diff.
+/// Returns None if there are no changes.
+fn capture_dirty_diff(repo_root: &Path) -> Result<Option<String>, String> {
+    // Staged + unstaged tracked changes
+    let tracked = Command::new("git")
+        .args(["diff", "HEAD"])
+        .current_dir(repo_root)
+        .output()
+        .map_err(|e| e.to_string())?;
+
+    if !tracked.status.success() {
+        return Err("git diff HEAD failed".to_string());
+    }
+
+    let diff = String::from_utf8_lossy(&tracked.stdout).to_string();
+
+    // Untracked files — generate diff with --no-index /dev/null <file>
+    let untracked = Command::new("git")
+        .args(["ls-files", "--others", "--exclude-standard"])
+        .current_dir(repo_root)
+        .output()
+        .map_err(|e| e.to_string())?;
+
+    let mut full_diff = diff;
+
+    if untracked.status.success() {
+        for file in String::from_utf8_lossy(&untracked.stdout).lines() {
+            let file = file.trim();
+            if file.is_empty() {
+                continue;
+            }
+            // Read the untracked file content and generate a pseudo-diff
+            let file_path = repo_root.join(file);
+            if let Ok(content) = fs::read_to_string(&file_path) {
+                full_diff.push_str(&format!("diff --git a/{file} b/{file}\n"));
+                full_diff.push_str("new file mode 100644\n");
+                full_diff.push_str("--- /dev/null\n");
+                full_diff.push_str(&format!("+++ b/{file}\n"));
+                let lines: Vec<&str> = content.lines().collect();
+                full_diff.push_str(&format!("@@ -0,0 +1,{} @@\n", lines.len()));
+                for line in &lines {
+                    full_diff.push('+');
+                    full_diff.push_str(line);
+                    full_diff.push('\n');
+                }
+            }
+        }
+    }
+
+    if full_diff.trim().is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(full_diff))
+    }
+}
+
+/// Apply a unified diff patch to a directory
+fn apply_patch(worker_dir: &Path, patch: &str) -> Result<(), String> {
+    let mut child = Command::new("git")
+        .args(["apply", "--allow-empty", "-"])
+        .current_dir(worker_dir)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write;
+        stdin.write_all(patch.as_bytes()).map_err(|e| e.to_string())?;
+    }
+
+    let status = child.wait().map_err(|e| e.to_string())?;
+    if !status.success() {
+        return Err("git apply failed — some changes could not be transferred".to_string());
+    }
+
+    Ok(())
+}
 
 fn run_git(args: &[&str]) -> Result<(), String> {
     let output = Command::new("git").args(args).output().map_err(|e| e.to_string())?;
@@ -216,6 +435,81 @@ fn run_git_in(dir: &std::path::Path, args: &[&str]) -> Result<(), String> {
     Ok(())
 }
 
+fn count_changes(dir: &std::path::Path) -> usize {
+    let output = Command::new("git")
+        .args(["status", "--short"])
+        .current_dir(dir)
+        .output()
+        .ok();
+    match output {
+        Some(o) if o.status.success() => {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .filter(|l| !l.is_empty())
+                .count()
+        }
+        _ => 0,
+    }
+}
+
+fn get_ahead_behind(dir: &std::path::Path) -> String {
+    let output = Command::new("git")
+        .args(["rev-list", "--left-right", "--count", "HEAD...@{upstream}"])
+        .current_dir(dir)
+        .output()
+        .ok();
+    match output {
+        Some(o) if o.status.success() => {
+            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            let parts: Vec<&str> = s.split('\t').collect();
+            if parts.len() == 2 {
+                let ahead: i32 = parts[0].parse().unwrap_or(0);
+                let behind: i32 = parts[1].parse().unwrap_or(0);
+                match (ahead, behind) {
+                    (0, 0) => "up-to-date".to_string(),
+                    (a, 0) => format!("↑{a}"),
+                    (0, b) => format!("↓{b}"),
+                    (a, b) => format!("↑{a}↓{b}"),
+                }
+            } else {
+                "-".to_string()
+            }
+        }
+        _ => "local".to_string(),
+    }
+}
+
+fn get_last_commit(dir: &std::path::Path) -> String {
+    let output = Command::new("git")
+        .args(["log", "--oneline", "-1"])
+        .current_dir(dir)
+        .output()
+        .ok();
+    match output {
+        Some(o) if o.status.success() => {
+            String::from_utf8_lossy(&o.stdout).trim().to_string()
+        }
+        _ => "-".to_string(),
+    }
+}
+
+/// Check if HEAD in the worker dir is merged into origin/main (or origin/master).
+/// Uses `git merge-base --is-ancestor HEAD origin/<main>` inside the worker directory.
+fn is_branch_merged(worker_dir: &std::path::Path) -> bool {
+    for branch in &["main", "master"] {
+        let remote_ref = format!("origin/{branch}");
+        let output = Command::new("git")
+            .args(["merge-base", "--is-ancestor", "HEAD", &remote_ref])
+            .current_dir(worker_dir)
+            .output()
+            .ok();
+        if matches!(output, Some(ref o) if o.status.success()) {
+            return true;
+        }
+    }
+    false
+}
+
 fn get_branch(dir: &std::path::Path) -> Option<String> {
     let output = Command::new("git")
         .args(["branch", "--show-current"])
@@ -228,5 +522,44 @@ fn get_branch(dir: &std::path::Path) -> Option<String> {
         if branch.is_empty() { None } else { Some(branch) }
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- apply_repo_prefix ---
+
+    #[test]
+    fn prefix_added_when_missing() {
+        assert_eq!(apply_repo_prefix("issue-42", "nexus"), "nexus-issue-42");
+    }
+
+    #[test]
+    fn prefix_not_doubled() {
+        assert_eq!(
+            apply_repo_prefix("nexus-issue-42", "nexus"),
+            "nexus-issue-42"
+        );
+    }
+
+    #[test]
+    fn prefix_empty_repo_name() {
+        assert_eq!(apply_repo_prefix("issue-42", ""), "issue-42");
+    }
+
+    #[test]
+    fn prefix_exact_repo_name_without_dash() {
+        // "nexus" != "nexus-" prefix, so it gets prefixed
+        assert_eq!(apply_repo_prefix("nexus", "nexus"), "nexus-nexus");
+    }
+
+    #[test]
+    fn prefix_partial_match_not_confused() {
+        // "nexus-pro" starts with "nexus-" so no double prefix
+        assert_eq!(apply_repo_prefix("nexus-pro", "nexus"), "nexus-pro");
+        // "nexuspro" does NOT start with "nexus-" so it gets prefixed
+        assert_eq!(apply_repo_prefix("nexuspro", "nexus"), "nexus-nexuspro");
     }
 }
