@@ -97,7 +97,7 @@ pub fn load_config(repo_root: &Path) -> Result<WorkerConfig, String> {
 
 /// Get the workers cache directory
 pub fn workers_dir() -> PathBuf {
-    if let Ok(dir) = env::var("CW_WORKERS_DIR") {
+    if let Ok(dir) = env::var("CCWS_WORKERS_DIR") {
         return PathBuf::from(dir);
     }
     let cache = env::var("XDG_CACHE_HOME")
@@ -106,7 +106,7 @@ pub fn workers_dir() -> PathBuf {
             let home = env::var("HOME").expect("HOME not set");
             PathBuf::from(home).join(".cache")
         });
-    cache.join("cw")
+    cache.join("ccws")
 }
 
 /// Get the repo name (basename of repo root)

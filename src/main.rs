@@ -5,7 +5,7 @@ mod commands;
 mod config;
 
 #[derive(Parser)]
-#[command(name = "cw", about = "Claude Workers - Git clone-based workspace manager")]
+#[command(name = "ccws", about = "Claude Code Workspace - Git clone-based workspace manager")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
