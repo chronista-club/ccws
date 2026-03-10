@@ -261,4 +261,38 @@ symlink-pattern "**/*.local.*"
 
         let _ = fs::remove_dir_all(&tmp);
     }
+
+    #[test]
+    fn load_config_invalid_kdl_unclosed_string() {
+        let tmp = test_dir("invalid-kdl-unclosed");
+        let _ = fs::create_dir_all(tmp.join(".claude"));
+        // 閉じていない文字列リテラル
+        fs::write(
+            tmp.join(".claude/worker-files.kdl"),
+            r#"symlink ".env"#,
+        )
+        .unwrap();
+
+        let result = load_config(&tmp);
+        assert!(result.is_err(), "unclosed string should return Err");
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn load_config_invalid_kdl_syntax_error() {
+        let tmp = test_dir("invalid-kdl-syntax");
+        let _ = fs::create_dir_all(tmp.join(".claude"));
+        // 不正な KDL 構文: 識別子の位置に記号
+        fs::write(
+            tmp.join(".claude/worker-files.kdl"),
+            "= broken syntax {\n",
+        )
+        .unwrap();
+
+        let result = load_config(&tmp);
+        assert!(result.is_err(), "syntax error should return Err");
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
 }

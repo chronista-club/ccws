@@ -529,26 +529,30 @@ fn is_branch_merged(worker_dir: &std::path::Path) -> bool {
             continue;
         }
 
-        // Guard: skip if worker has no local commits (HEAD == origin/main)
-        let diverged = Command::new("git")
-            .args(["rev-list", &format!("{remote_ref}..HEAD"), "--count"])
-            .current_dir(worker_dir)
-            .output()
-            .ok();
-        let local_commits: usize = diverged
-            .as_ref()
-            .filter(|o| o.status.success())
-            .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse().ok())
-            .unwrap_or(0);
-
-        if local_commits == 0 {
-            // No divergence — freshly created worker, not "merged"
+        // Guard: skip if HEAD is exactly the same commit as origin/main
+        // (freshly created worker that hasn't diverged yet)
+        let head_sha = git_rev_parse(worker_dir, "HEAD");
+        let remote_sha = git_rev_parse(worker_dir, &remote_ref);
+        if head_sha == remote_sha {
             continue;
         }
 
         return true;
     }
     false
+}
+
+fn git_rev_parse(dir: &std::path::Path, rev: &str) -> Option<String> {
+    let output = Command::new("git")
+        .args(["rev-parse", rev])
+        .current_dir(dir)
+        .output()
+        .ok()?;
+    if output.status.success() {
+        Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        None
+    }
 }
 
 fn get_branch(dir: &std::path::Path) -> Option<String> {
@@ -569,6 +573,50 @@ fn get_branch(dir: &std::path::Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command as Cmd;
+
+    // --- test helpers ---
+
+    /// Create a unique temp dir per test to avoid parallel test collisions
+    fn test_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "ccws-cmd-test-{name}-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Initialize a git repo with an initial commit in the given directory.
+    /// Configures local user.name/email to avoid system config dependency.
+    fn git_init_with_commit(dir: &std::path::Path) {
+        Cmd::new("git").args(["init"]).current_dir(dir).output().unwrap();
+        Cmd::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        Cmd::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        // initial commit
+        fs::write(dir.join("README.md"), "# test\n").unwrap();
+        Cmd::new("git").args(["add", "."]).current_dir(dir).output().unwrap();
+        Cmd::new("git")
+            .args(["commit", "-m", "initial commit"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        // Ensure we are on 'main'
+        Cmd::new("git")
+            .args(["branch", "-M", "main"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+    }
 
     // --- apply_repo_prefix ---
 
@@ -602,5 +650,202 @@ mod tests {
         assert_eq!(apply_repo_prefix("nexus-pro", "nexus"), "nexus-pro");
         // "nexuspro" does NOT start with "nexus-" so it gets prefixed
         assert_eq!(apply_repo_prefix("nexuspro", "nexus"), "nexus-nexuspro");
+    }
+
+    // --- capture_dirty_diff ---
+
+    #[test]
+    fn capture_dirty_diff_no_changes_returns_none() {
+        let repo = test_dir("dirty-diff-clean");
+        git_init_with_commit(&repo);
+
+        let result = capture_dirty_diff(&repo).unwrap();
+        assert!(result.is_none(), "clean repo should return None");
+
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn capture_dirty_diff_tracked_change_returns_some() {
+        let repo = test_dir("dirty-diff-tracked");
+        git_init_with_commit(&repo);
+
+        // tracked ファイルを変更
+        fs::write(repo.join("README.md"), "# modified\n").unwrap();
+
+        let result = capture_dirty_diff(&repo).unwrap();
+        assert!(result.is_some(), "tracked change should return Some diff");
+        let diff = result.unwrap();
+        assert!(diff.contains("README.md"), "diff should mention the changed file");
+
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn capture_dirty_diff_untracked_file_included() {
+        let repo = test_dir("dirty-diff-untracked");
+        git_init_with_commit(&repo);
+
+        // untracked ファイルを追加
+        fs::write(repo.join("new_file.txt"), "hello world\n").unwrap();
+
+        let result = capture_dirty_diff(&repo).unwrap();
+        assert!(result.is_some(), "untracked file should produce Some diff");
+        let diff = result.unwrap();
+        assert!(
+            diff.contains("new_file.txt"),
+            "diff should include the untracked file"
+        );
+
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    // --- is_branch_merged ---
+
+    /// bare repo → clone 構成で origin/main を持つワーカーを作る
+    fn setup_merged_worker_repos(base: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+        // 1. bare repo（origin の代替）を作成
+        let bare = base.join("bare.git");
+        fs::create_dir_all(&bare).unwrap();
+        Cmd::new("git").args(["init", "--bare"]).current_dir(&bare).output().unwrap();
+
+        // 2. bare を clone してメイン repo を作る
+        let main_repo = base.join("main_repo");
+        Cmd::new("git")
+            .args(["clone", bare.to_str().unwrap(), main_repo.to_str().unwrap()])
+            .output()
+            .unwrap();
+        Cmd::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(&main_repo)
+            .output()
+            .unwrap();
+        Cmd::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&main_repo)
+            .output()
+            .unwrap();
+
+        // initial commit を main_repo で作り、bare に push
+        fs::write(main_repo.join("README.md"), "# init\n").unwrap();
+        Cmd::new("git").args(["add", "."]).current_dir(&main_repo).output().unwrap();
+        Cmd::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(&main_repo)
+            .output()
+            .unwrap();
+        // main ブランチにリネーム
+        Cmd::new("git")
+            .args(["branch", "-M", "main"])
+            .current_dir(&main_repo)
+            .output()
+            .unwrap();
+        Cmd::new("git")
+            .args(["push", "-u", "origin", "main"])
+            .current_dir(&main_repo)
+            .output()
+            .unwrap();
+
+        // 3. worker repo を bare から clone
+        let worker_repo = base.join("worker");
+        Cmd::new("git")
+            .args(["clone", bare.to_str().unwrap(), worker_repo.to_str().unwrap()])
+            .output()
+            .unwrap();
+        Cmd::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(&worker_repo)
+            .output()
+            .unwrap();
+        Cmd::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&worker_repo)
+            .output()
+            .unwrap();
+
+        (main_repo, worker_repo)
+    }
+
+    #[test]
+    fn is_branch_merged_returns_true_after_merge() {
+        let base = test_dir("merged-true");
+        let (main_repo, worker_repo) = setup_merged_worker_repos(&base);
+
+        // worker で feature ブランチを作りコミット
+        Cmd::new("git")
+            .args(["checkout", "-b", "feature"])
+            .current_dir(&worker_repo)
+            .output()
+            .unwrap();
+        fs::write(worker_repo.join("feature.txt"), "feature work\n").unwrap();
+        Cmd::new("git").args(["add", "."]).current_dir(&worker_repo).output().unwrap();
+        Cmd::new("git")
+            .args(["commit", "-m", "feature commit"])
+            .current_dir(&worker_repo)
+            .output()
+            .unwrap();
+
+        // worker の feature を bare に push
+        Cmd::new("git")
+            .args(["push", "origin", "feature"])
+            .current_dir(&worker_repo)
+            .output()
+            .unwrap();
+
+        // main_repo で feature を main に merge して push
+        Cmd::new("git")
+            .args(["fetch", "origin"])
+            .current_dir(&main_repo)
+            .output()
+            .unwrap();
+        Cmd::new("git")
+            .args(["merge", "origin/feature", "--no-edit"])
+            .current_dir(&main_repo)
+            .output()
+            .unwrap();
+        // main にさらに1コミット追加して origin/main を feature より先に進める
+        fs::write(main_repo.join("extra.txt"), "extra\n").unwrap();
+        Cmd::new("git").args(["add", "."]).current_dir(&main_repo).output().unwrap();
+        Cmd::new("git")
+            .args(["commit", "-m", "post-merge commit"])
+            .current_dir(&main_repo)
+            .output()
+            .unwrap();
+        Cmd::new("git")
+            .args(["push", "origin", "main"])
+            .current_dir(&main_repo)
+            .output()
+            .unwrap();
+
+        // worker が fetch して origin/main を最新化
+        // worker の HEAD は feature のまま（origin/main より古い）
+        Cmd::new("git")
+            .args(["fetch", "origin"])
+            .current_dir(&worker_repo)
+            .output()
+            .unwrap();
+
+        // worker HEAD は origin/main の祖先 + 分岐あり → merged = true
+        assert!(
+            is_branch_merged(&worker_repo),
+            "merged feature branch should return true"
+        );
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn is_branch_merged_returns_false_when_head_equals_origin_main() {
+        let base = test_dir("merged-false-fresh");
+        let (_, worker_repo) = setup_merged_worker_repos(&base);
+
+        // worker に local commit なし（HEAD == origin/main）
+        // false-positive ガード: is_branch_merged は false を返すべき
+        assert!(
+            !is_branch_merged(&worker_repo),
+            "fresh worker (HEAD == origin/main) should return false"
+        );
+
+        let _ = fs::remove_dir_all(&base);
     }
 }
