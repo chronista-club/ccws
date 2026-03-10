@@ -4,27 +4,28 @@ use std::process::Command;
 use std::fs;
 
 /// Create a new worker environment
-pub fn new_worker(name: &str, branch: &str) -> Result<(), String> {
-    let worker_dir = setup_worker(name, branch)?;
+pub fn new_worker(name: &str, branch: &str, force: bool) -> Result<(), String> {
+    let repo_root = config::find_repo_root().map_err(|e| e.to_string())?;
+    let worker_dir = setup_worker(name, branch, &repo_root, force)?;
     println!("{}", worker_dir.display());
     Ok(())
 }
 
 /// Fork current dirty state into a new worker environment
-pub fn fork_worker(name: &str, branch: &str) -> Result<(), String> {
+pub fn fork_worker(name: &str, branch: &str, force: bool) -> Result<(), String> {
     let repo_root = config::find_repo_root().map_err(|e| e.to_string())?;
 
     // Capture dirty state as a diff BEFORE creating the worker
     let diff = capture_dirty_diff(&repo_root)?;
 
-    let worker_dir = setup_worker(name, branch)?;
+    let worker_dir = setup_worker(name, branch, &repo_root, force)?;
 
     // Apply the captured diff to the worker
     if let Some(patch) = diff {
-        eprintln!("Applying dirty state...");
+        eprintln!("dirty state を適用中...");
         apply_patch(&worker_dir, &patch)?;
     } else {
-        eprintln!("No uncommitted changes to fork.");
+        eprintln!("フォークする未コミット変更はありません。");
     }
 
     println!("{}", worker_dir.display());
@@ -33,12 +34,11 @@ pub fn fork_worker(name: &str, branch: &str) -> Result<(), String> {
 
 /// Common worker setup: clone, symlink, branch, post-setup.
 /// Returns the worker directory path.
-fn setup_worker(name: &str, branch: &str) -> Result<PathBuf, String> {
+fn setup_worker(name: &str, branch: &str, repo_root: &Path, force: bool) -> Result<PathBuf, String> {
     config::validate_worker_name(name)?;
 
-    let repo_root = config::find_repo_root().map_err(|e| e.to_string())?;
     let remote_url = config::get_remote_url().map_err(|e| e.to_string())?;
-    let cfg = config::load_config(&repo_root)?;
+    let cfg = config::load_config(repo_root)?;
     let workers_dir = config::workers_dir()?;
 
     // Auto-prefix with repo name if not already included
@@ -46,19 +46,24 @@ fn setup_worker(name: &str, branch: &str) -> Result<PathBuf, String> {
     let actual_name = apply_repo_prefix(name, &repo_name);
     let worker_dir = workers_dir.join(&actual_name);
 
-    // Clean up existing
+    // Check existing worker
     if worker_dir.exists() {
-        eprintln!("Cleaning up existing worker: {}", worker_dir.display());
+        if !force {
+            return Err(format!(
+                "ワーカー '{actual_name}' は既に存在します。上書きするには --force を指定してください。"
+            ));
+        }
+        eprintln!("既存ワーカーを削除: {}", worker_dir.display());
         fs::remove_dir_all(&worker_dir).map_err(|e| e.to_string())?;
     }
 
     // Clone
     fs::create_dir_all(&workers_dir).map_err(|e| e.to_string())?;
-    eprintln!("Cloning to {}...", worker_dir.display());
+    eprintln!("{} にクローン中...", worker_dir.display());
     let repo_root_str = repo_root.to_str()
-        .ok_or("repo root path is not valid UTF-8")?;
+        .ok_or("リポジトリルートのパスが有効な UTF-8 ではありません")?;
     let worker_dir_str = worker_dir.to_str()
-        .ok_or("worker dir path is not valid UTF-8")?;
+        .ok_or("ワーカーディレクトリのパスが有効な UTF-8 ではありません")?;
     run_git(&["clone", "--depth", "1", repo_root_str, worker_dir_str])?;
 
     // Set remote to GitHub URL
@@ -120,7 +125,7 @@ fn setup_worker(name: &str, branch: &str) -> Result<PathBuf, String> {
 
     // Post-setup
     if let Some(cmd) = &cfg.post_setup {
-        eprintln!("Running: {cmd}");
+        eprintln!("実行中: {cmd}");
         let status = Command::new("sh")
             .args(["-c", cmd])
             .current_dir(&worker_dir)
@@ -128,7 +133,7 @@ fn setup_worker(name: &str, branch: &str) -> Result<PathBuf, String> {
             .map_err(|e| e.to_string())?;
 
         if !status.success() {
-            return Err(format!("post-setup failed: {cmd}"));
+            return Err(format!("post-setup 失敗: {cmd}"));
         }
     }
 
@@ -176,7 +181,7 @@ pub fn worker_path(name: &str) -> Result<(), String> {
             return Ok(());
         }
     }
-    Err(format!("worker '{name}' not found. Run `ccws ls` to see available workers."))
+    Err(format!("ワーカー '{name}' が見つかりません。`ccws ls` で一覧を確認してください。"))
 }
 
 /// Remove a worker environment
@@ -185,22 +190,22 @@ pub fn remove_worker(name: Option<&str>, all: bool, force: bool) -> Result<(), S
 
     if all {
         if !force {
-            return Err("--all requires --force to prevent accidental deletion".into());
+            return Err("--all には --force が必要です（誤削除防止）".into());
         }
         if workers_dir.exists() {
             fs::remove_dir_all(&workers_dir).map_err(|e| e.to_string())?;
-            eprintln!("Removed all workers");
+            eprintln!("全ワーカーを削除しました");
         }
         return Ok(());
     }
 
-    let name = name.ok_or("specify a worker name or --all --force")?;
+    let name = name.ok_or("ワーカー名を指定するか --all --force を使用してください")?;
     config::validate_worker_name(name)?;
 
     let worker_dir = workers_dir.join(name);
     if worker_dir.exists() {
         fs::remove_dir_all(&worker_dir).map_err(|e| e.to_string())?;
-        eprintln!("Removed worker: {name}");
+        eprintln!("削除: {name}");
         return Ok(());
     }
     // Fallback: try with repo name prefix
@@ -209,11 +214,11 @@ pub fn remove_worker(name: Option<&str>, all: bool, force: bool) -> Result<(), S
         let prefixed_dir = workers_dir.join(&prefixed_name);
         if prefixed_dir.exists() {
             fs::remove_dir_all(&prefixed_dir).map_err(|e| e.to_string())?;
-            eprintln!("Removed worker: {prefixed_name}");
+            eprintln!("削除: {prefixed_name}");
             return Ok(());
         }
     }
-    Err(format!("worker '{name}' not found. Run `ccws ls` to see available workers."))
+    Err(format!("ワーカー '{name}' が見つかりません。`ccws ls` で一覧を確認してください。"))
 }
 
 /// Show status of all worker environments
@@ -346,7 +351,7 @@ fn capture_dirty_diff(repo_root: &Path) -> Result<Option<String>, String> {
         .map_err(|e| e.to_string())?;
 
     if !tracked.status.success() {
-        return Err("git diff HEAD failed".to_string());
+        return Err("git diff HEAD に失敗しました".to_string());
     }
 
     let diff = String::from_utf8_lossy(&tracked.stdout).to_string();

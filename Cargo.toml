@@ -7,5 +7,5 @@ rust-version = "1.93"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-unison-kdl = { git = "https://github.com/chronista-club/unison-kdl" }
+unison-kdl = { git = "https://github.com/chronista-club/unison-kdl", rev = "4fbebee" }
 glob = "0.3"

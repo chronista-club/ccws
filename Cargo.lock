@@ -313,7 +313,7 @@ checksum = "7dd6e30e90baa6f72411720665d41d89b9a3d039dc45b8faea1ddd07f617f6af"
 [[package]]
 name = "unison-kdl"
 version = "0.1.0"
-source = "git+https://github.com/chronista-club/unison-kdl#4d8eb1d500aa6e5084f4f2757d7e1a5321b595c2"
+source = "git+https://github.com/chronista-club/unison-kdl?rev=4fbebee#4fbebeeacb7921a7fe468359ea4916a5f978b0d1"
 dependencies = [
  "kdl",
  "thiserror",
@@ -323,7 +323,7 @@ dependencies = [
 [[package]]
 name = "unison-kdl-derive"
 version = "0.1.0"
-source = "git+https://github.com/chronista-club/unison-kdl#4d8eb1d500aa6e5084f4f2757d7e1a5321b595c2"
+source = "git+https://github.com/chronista-club/unison-kdl?rev=4fbebee#4fbebeeacb7921a7fe468359ea4916a5f978b0d1"
 dependencies = [
  "proc-macro2",
  "quote",

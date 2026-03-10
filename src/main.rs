@@ -19,6 +19,9 @@ enum Commands {
         name: String,
         /// Branch name to create
         branch: String,
+        /// Overwrite existing worker
+        #[arg(long, short)]
+        force: bool,
     },
     /// Fork current dirty state into a new worker environment
     Fork {
@@ -26,6 +29,9 @@ enum Commands {
         name: String,
         /// Branch name to create
         branch: String,
+        /// Overwrite existing worker
+        #[arg(long, short)]
+        force: bool,
     },
     /// List all worker environments
     Ls,
@@ -59,8 +65,8 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
 
     let result = match cli.command {
-        Commands::New { name, branch } => commands::new_worker(&name, &branch),
-        Commands::Fork { name, branch } => commands::fork_worker(&name, &branch),
+        Commands::New { name, branch, force } => commands::new_worker(&name, &branch, force),
+        Commands::Fork { name, branch, force } => commands::fork_worker(&name, &branch, force),
         Commands::Ls => commands::list_workers(),
         Commands::Path { name } => commands::worker_path(&name),
         Commands::Rm { name, all, force } => commands::remove_worker(name.as_deref(), all, force),
@@ -71,7 +77,7 @@ fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("error: {e}");
+            eprintln!("エラー: {e}");
             ExitCode::FAILURE
         }
     }
