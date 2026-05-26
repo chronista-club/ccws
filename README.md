@@ -1,5 +1,10 @@
 # ccws
 
+> [!NOTE]
+> **このリポジトリはアーカイブされました（2026-05-26）**
+> 後継: [vp lane](https://github.com/chronista-club/vantage-point) — vantage-point の lane/wing インフラに統合されました。
+> 新規利用は vantage-point をご検討ください。
+
 Claude Code Workspace — Git clone ベースのワークスペースマネージャー。リポジトリの独立コピーを作り、並列で作業できるようにする。
 
 ## インストール
